@@ -6,34 +6,34 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 1. Ask for the target username
-read -p "Enter the username you want to configure for RDP: " RDP_USER
+# 1. Target User Configuration
+read -p "Enter the username to configure for RDP: " RDP_USER
 
-# Verify user exists
 if ! id "$RDP_USER" >/dev/null 2>&1; then
     echo "Error: User '$RDP_USER' does not exist."
     exit 1
 fi
 
-echo "--- Harmonizing System State for: $RDP_USER ---"
+USER_HOME=$(eval echo ~$RDP_USER)
+echo "--- Starting Idempotent RDP/SSH Setup for: $RDP_USER ---"
 
-# 2. Install packages (Apt is naturally idempotent)
-apt update && apt install -y openssh-server xrdp dbus-x11 xserver-xorg-core xorgxrdp
+# 2. Package Installation
+# xorgxrdp is the critical bridge for Ubuntu Desktop
+apt update
+apt install -y openssh-server xrdp xorgxrdp dbus-x11
 
-# 3. Secure RDP Configuration (THE IDEMPOTENT FIX)
-# We delete ALL port lines and then add exactly one. 
-# This fixes the 'trans_listen_address failed' error.
+# 3. Idempotent xrdp.ini Configuration
+# Use a temporary file to rebuild the config to ensure no duplicates
 sed -i '/^port=/d' /etc/xrdp/xrdp.ini
-echo "port=tcp://127.0.0.1:3389" >> /etc/xrdp/xrdp.ini
+sed -i '/\[Globals\]/a port=tcp://127.0.0.1:3389' /etc/xrdp/xrdp.ini
 
-# Safe group addition (prevents 'already a member' warnings)
-id -nG xrdp | grep -qw "ssl-cert" || adduser xrdp ssl-cert
-
-# Fix SSL file permissions (State-based correction)
+# Fix SSL permissions for the xrdp user
+adduser xrdp ssl-cert 2>/dev/null || true
 chown root:ssl-cert /etc/xrdp/key.pem
 chmod 640 /etc/xrdp/key.pem
 
-# 4. Polkit Rules (Atomic overwrite)
+# 4. Polkit Rules (Atomic Overwrite)
+# This prevents the "Authentication Required" popups for color profiles
 mkdir -p /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/45-allow-colord.rules <<EOF
 polkit.addRule(function(action, subject) {
@@ -50,42 +50,45 @@ polkit.addRule(function(action, subject) {
 EOF
 id -nG "$RDP_USER" | grep -qw "users" || usermod -aG users "$RDP_USER"
 
-# 5. Xwrapper Configuration (State-based correction)
+# 5. Xwrapper Configuration (Idempotent fix for 24.04)
 if [ -f /etc/X11/Xwrapper.config ]; then
-    sed -i 's/allowed_users=.*/allowed_users=console/g' /etc/X11/Xwrapper.config
+    sed -i 's/allowed_users=.*/allowed_users=anybody/g' /etc/X11/Xwrapper.config
 else
-    echo "allowed_users=console" > /etc/X11/Xwrapper.config
+    echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
 fi
 
-# 6. User .xsession (Atomic overwrite)
-USER_HOME=$(eval echo ~$RDP_USER)
+# 6. User .xsession (The Logic Engine)
+# We use dbus-run-session to ensure GNOME 46 gets a fresh bus every time.
 cat > "$USER_HOME/.xsession" <<EOF
 #!/bin/bash
 export LIBGL_ALWAYS_SOFTWARE=1
 export GSK_RENDERER=cairo
 export NO_AT_BRIDGE=1
-export GNOME_SHELL_SESSION_MODE=ubuntu
 export XDG_CURRENT_DESKTOP=ubuntu:GNOME
 export XDG_SESSION_TYPE=x11
+export GNOME_SHELL_SESSION_MODE=ubuntu
 exec dbus-run-session -- gnome-session
 EOF
 
 chown "$RDP_USER":"$RDP_USER" "$USER_HOME/.xsession"
 chmod +x "$USER_HOME/.xsession"
 
-# 7. Final Service Sync & Port Clearance
-echo "Cleaning up hung sockets and starting services..."
-systemctl stop xrdp 2>/dev/null || true
-# Force-clear the port in case a zombie process is holding it
-fuser -k 3389/tcp 2>/dev/null || true
+# 7. Final Service Sync & Port Verification
+echo "Restarting services..."
+systemctl stop xrdp xrdp-sesman 2>/dev/null || true
+fuser -k 3389/tcp 2>/dev/null || true # Clear port if stuck
 
 systemctl enable --now ssh
 systemctl restart xrdp-sesman
 systemctl restart xrdp
 
-# Verification block
+# Final check
 if ss -lnt | grep -q 3389; then
-    echo "--- SUCCESS: System is listening on 3389 ---"
+    echo "--- SETUP SUCCESSFUL ---"
+    echo "Connect via Windows:"
+    echo "1. SSH: ssh -L 3390:127.0.0.1:3389 $RDP_USER@<IP>"
+    echo "2. RDP: Connect to 'localhost:3390'"
 else
-    echo "--- FAILED: Port 3389 is still not listening. ---"
+    echo "--- SETUP FAILED: Port 3389 not listening ---"
+    exit 1
 fi
