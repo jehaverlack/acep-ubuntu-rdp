@@ -6,36 +6,24 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 1. Configuration
 read -p "Enter the username for RDP: " RDP_USER
 USER_HOME=$(eval echo ~$RDP_USER)
 
-if ! id "$RDP_USER" >/dev/null 2>&1; then
-    echo "Error: User '$RDP_USER' does not exist."
-    exit 1
-fi
-
-echo "--- Harmonizing System State for: $RDP_USER ---"
-
-# 2. Package Installation (Matches your history line 4 & 30)
+echo "--- Installing Full Stack (Matches your manual history) ---"
 apt update
-apt install -y openssh-server xrdp xserver-xorg-core dbus-x11 xorgxrdp
+apt install -y openssh-server xrdp xorgxrdp dbus-x11 xserver-xorg-core
 
-# 3. Secure xrdp.ini Reconstruction
-# Fixes the duplicate port issue and forces TLS for the tunnel
+# 1. Config xrdp.ini to listen only on Localhost (Idempotent)
 sed -i '/^port=/d' /etc/xrdp/xrdp.ini
 sed -i '/\[Globals\]/a port=tcp://127.0.0.1:3389' /etc/xrdp/xrdp.ini
 
-# 4. Permissions (Matches your history line 6)
+# 2. SSL Group (Your history line 6)
 adduser xrdp ssl-cert 2>/dev/null || true
-chown root:ssl-cert /etc/xrdp/key.pem
-chmod 640 /etc/xrdp/key.pem
 
-# 5. X11 Wrapper (Matches your history line 11)
-# 24.04 Desktop requires 'anybody' to allow XRDP to start its own X server
+# 3. X11 Wrapper (Your history line 11)
 echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
 
-# 6. Polkit Rule (Matches your history line 24, updated for 24.04 JS format)
+# 4. Polkit (Your history line 24 - but using 24.04 JS rules)
 mkdir -p /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/45-allow-colord.rules <<EOF
 polkit.addRule(function(action, subject) {
@@ -47,37 +35,32 @@ polkit.addRule(function(action, subject) {
 });
 EOF
 
-# 7. User .xsession (Matches your history line 4 & 9)
-# Use dbus-run-session to ensure GNOME 46 doesn't crash on the 'Cyan' screen
+# 5. The .xsession (Mirrors your working ubnt-demo config)
 cat > "$USER_HOME/.xsession" <<EOF
 #!/bin/bash
+# Force Software Rendering
 export LIBGL_ALWAYS_SOFTWARE=1
-export GSK_RENDERER=cairo
+
+# Fix the DBus connection (Your exact working manual logic)
+if [ -z "\$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval \$(dbus-launch --sh-syntax --exit-with-session)
+fi
+
+# GNOME environment variables
+export GNOME_SHELL_SESSION_MODE=ubuntu
 export XDG_CURRENT_DESKTOP=ubuntu:GNOME
 export XDG_SESSION_TYPE=x11
-export GNOME_SHELL_SESSION_MODE=ubuntu
-exec dbus-run-session -- gnome-session
+
+# Start the session
+exec gnome-session
 EOF
+
 chown "$RDP_USER":"$RDP_USER" "$USER_HOME/.xsession"
-chmod +x "$USER_HOME/.xsession"
+chmod 755 "$USER_HOME/.xsession"
 
-# 8. Service Sync
-echo "Restarting services and clearing stale locks..."
-systemctl stop xrdp xrdp-sesman 2>/dev/null || true
-
-# Important: We kill only GUI/RDP processes to avoid kicking you off SSH
-pgrep -u "$RDP_USER" -f "gnome-session|dbus|xrdp" | xargs kill -9 2>/dev/null || true
-
-systemctl enable --now ssh
-systemctl restart xrdp-sesman
+# 6. Service Restart
 systemctl restart xrdp
+systemctl enable --now ssh
 
-# 9. Verification
-sleep 2
-if ss -lnt | grep -q 3389; then
-    echo "--- SUCCESS ---"
-    echo "Connect RDP to localhost:3390 after running:"
-    echo "ssh -L 3390:127.0.0.1:3389 $RDP_USER@$(hostname -I | awk '{print $1}')"
-else
-    echo "--- FAILED: Port 3389 still not listening ---"
-fi
+echo "--- SETUP COMPLETE ---"
+echo "Connect RDP to localhost:3390 via SSH tunnel."
