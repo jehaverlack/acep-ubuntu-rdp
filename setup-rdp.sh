@@ -75,7 +75,7 @@ chmod +x "$USER_HOME/.xsession"
 # 7. Restart services
 systemctl restart xrdp
 systemctl enable xrdp
-
+systemctl enable ssh
 echo "--- Setup Complete ---"
 echo "1. Close your KVM window (or log out of $RDP_USER physically)."
 echo "2. On Windows, run: ssh -L 3390:127.0.0.1:3389 $RDP_USER@$(hostname -I | awk '{print $1}')"
