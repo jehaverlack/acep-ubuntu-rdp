@@ -58,6 +58,14 @@ EOF
 chown "$RDP_USER":"$RDP_USER" "$USER_HOME/.xsession"
 chmod 755 "$USER_HOME/.xsession"
 
+
+# Add this to your script before 'systemctl restart xrdp'
+echo "Clearing ghost sessions..."
+# Log out any sessions tracked by systemd-logind for this user
+loginctl terminate-user "$RDP_USER" 2>/dev/null || true
+sleep 1
+
+
 # 6. Service Restart
 systemctl restart xrdp
 systemctl enable --now ssh
