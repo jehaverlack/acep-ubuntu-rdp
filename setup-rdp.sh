@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Check if running as root
+# Ensure running as root
 if [ "$EUID" -ne 0 ]; then 
   echo "Please run as root or with sudo"
-  exit
+  exit 1
 fi
 
 # 1. Ask for the target username
@@ -11,24 +11,23 @@ read -p "Enter the username you want to configure for RDP: " RDP_USER
 
 # Verify user exists
 if ! id "$RDP_USER" >/dev/null 2>&1; then
-    echo "Error: User '$RDP_USER' does not exist. Create the user first."
-    exit
+    echo "Error: User '$RDP_USER' does not exist."
+    exit 1
 fi
 
-echo "--- Starting setup for user: $RDP_USER ---"
+echo "--- Starting Idempotent Setup for: $RDP_USER ---"
 
-# 2. Install necessary packages
-echo "Installing dependencies..."
-apt update
-apt install -y openssh-server xrdp dbus-x11 xserver-xorg-core
+# 2. Install packages (apt is natively idempotent)
+apt update && apt install -y openssh-server xrdp dbus-x11 xserver-xorg-core
 
 # 3. Secure RDP (Tunnel-Only Mode)
-echo "Configuring RDP for SSH Tunneling only..."
-sed -i 's/port=3389/port=tcp:\/\/127.0.0.1:3389/g' /etc/xrdp/xrdp.ini
-adduser xrdp ssl-cert
+# Uses a regex to ensure we don't double-prefix if already changed
+sed -i 's/^port=[0-9]*/port=tcp:\/\/127.0.0.1:3389/' /etc/xrdp/xrdp.ini
 
-# 4. Create the Polkit Rule to prevent logout loops
-echo "Setting up Polkit rules for Color Manager..."
+# Safe group addition
+id -nG xrdp | grep -qw "ssl-cert" || adduser xrdp ssl-cert
+
+# 4. Create Polkit Rules (Overwrites file to ensure clean state)
 mkdir -p /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/45-allow-colord.rules <<EOF
 polkit.addRule(function(action, subject) {
@@ -43,18 +42,15 @@ polkit.addRule(function(action, subject) {
     }
 });
 EOF
-usermod -aG users "$RDP_USER"
+id -nG "$RDP_USER" | grep -qw "users" || usermod -aG users "$RDP_USER"
 
-# 5. Configure the Xwrapper
-echo "Configuring Xwrapper permissions..."
+# 5. Configure Xwrapper (Explicitly checks for existing line)
 if [ -f /etc/X11/Xwrapper.config ]; then
-    sed -i 's/allowed_users=console/allowed_users=anybody/g' /etc/X11/Xwrapper.config
-else
-    echo "allowed_users=anybody" > /etc/X11/Xwrapper.config
+    sed -i '/allowed_users=/d' /etc/X11/Xwrapper.config
 fi
+echo "allowed_users=anybody" >> /etc/X11/Xwrapper.config
 
-# 6. Create the user-specific .xsession file
-echo "Configuring .xsession for $RDP_USER..."
+# 6. Create User .xsession (Atomic overwrite)
 USER_HOME=$(eval echo ~$RDP_USER)
 cat > "$USER_HOME/.xsession" <<EOF
 #!/bin/bash
@@ -68,15 +64,12 @@ export XDG_SESSION_TYPE=x11
 exec gnome-session
 EOF
 
-# Set proper ownership and permissions
 chown "$RDP_USER":"$RDP_USER" "$USER_HOME/.xsession"
 chmod +x "$USER_HOME/.xsession"
 
-# 7. Restart services
+# 7. Final Service Sync
+systemctl enable --now ssh
+systemctl enable --now xrdp
 systemctl restart xrdp
-systemctl enable xrdp
-systemctl enable ssh
-echo "--- Setup Complete ---"
-echo "1. Close your KVM window (or log out of $RDP_USER physically)."
-echo "2. On Windows, run: ssh -L 3390:127.0.0.1:3389 $RDP_USER@$(hostname -I | awk '{print $1}')"
-echo "3. Connect Windows RDP to: localhost:3390"
+
+echo "--- Setup Complete & Verified ---"
