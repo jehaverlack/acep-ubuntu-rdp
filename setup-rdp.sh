@@ -72,13 +72,17 @@ EOF
 chown "$RDP_USER":"$RDP_USER" "$USER_HOME/.xsession"
 chmod +x "$USER_HOME/.xsession"
 
-# 7. Final Service Sync & Session Cleanup
-# Clean up any failed D-Bus or X11 sockets from previous tries
-pkill -u "$RDP_USER" || true
-rm -rf /run/user/$(id -u "$RDP_USER") || true
+# 7. Final Service Sync (Port-Conflict Aware)
+echo "Cleaning up ports and restarting services..."
 
-systemctl enable --now ssh
+# Kill anything squatting on the RDP port
+fuser -k 3389/tcp || true
+
+# Ensure xrdp.ini isn't duplicated (The cause of 'trans_listen_address failed')
+sed -i '/^port=/d' /etc/xrdp/xrdp.ini
+echo "port=tcp://127.0.0.1:3389" >> /etc/xrdp/xrdp.ini
+
+# Start fresh
+systemctl daemon-reload
 systemctl enable --now xrdp
 systemctl restart xrdp
-
-echo "--- Setup Complete ---"
